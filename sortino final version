@@ -1,0 +1,232 @@
+global.r
+
+library(shiny)
+library(tidyverse)
+library(lubridate)
+
+companies <- c("Google", "Facebook", "Apple", "Amazon")
+dates     <- seq.Date(as.Date("2010-1-1"), as.Date("2017-6-1"), by = "month")
+
+set.seed(1) 
+
+data <- tibble(
+  company = rep(companies, each = length(dates)),
+  date    = rep(dates, times = length(companies)),
+  exp_rtn = round(runif(length(date), min = 5, max = 15), 1)
+)
+
+
+
+
+
+
+
+ui.r
+
+
+
+shinyUI(fluidPage(
+
+  p(""),
+  fluidRow(
+    column(width = 2),
+    column(width = 10, h2("Sortino Ratio"))
+  ),
+  hr(),
+  fluidRow(
+    column(width = 1),
+    column(
+      width = 3,
+      div(
+        style = "background-color:#efefef; padding:10px;",
+        dateRangeInput("fltr_date", "Choose date range", 
+                       min = min(dates), max = max(dates),
+                       start = max(dates - 365), end = max(dates)- 182),
+        numericInput("target_return", "Target Return", value = round(runif(1, 3, 10), 1), min = 3, max = 10, step = 0.1),
+        div(
+          style = "background-color:#cdcdcd; padding:10px;",
+          p(strong("Stock A:")),
+          fluidRow(
+            column(width = 6, selectInput("stocka_company", "Company", choices = companies, selected = "Google")),
+            column(width = 6, numericInput("stocka_weight", "Weight", value = round(runif(1, 5, 30), 1), min = 5, max = 30, step = 0.1))
+            # selectInput("stocka_highlight", "Highlight", choices = c("None", "Minimum", "Maximum"), selected = "None"))
+          )
+        ),
+        p(""),
+        div(
+          style = "background-color:#cdcdcd; padding:10px;",
+          p(strong("Stock B:")),
+          
+          fluidRow(
+            column(width = 6, selectInput("stockb_company", "Company", choices = companies, selected = "Facebook")),
+            column(width = 6, numericInput("stockb_weight", "Weight", value = round(runif(1, 5, 30), 1), min = 5, max = 30, step = 0.1))
+            # selectInput("stockb_highlight", "Highlight", choices = c("None", "Minimum", "Maximum"), selected = "None"))
+          )
+        ),
+        p(""),
+        fluidRow(
+          column(width = 6),
+          column(width = 6, actionButton("add_to_sortino", "Add to Sortino plot"))
+        )
+      )
+    ),
+    column(
+      width = 7,
+      p(strong("Portfolio return and downside deviation")),
+      div(textOutput("sortino_ratio"), style = "font-size:20px; padding-left:20px"),
+      plotOutput("portfolio_plot", width = "100%", height = "600px")),
+    column(width = 1)
+  ),
+  hr(),
+  fluidRow(
+    column(width = 1),
+    column(width = 3,
+           div(
+             style = "background-color:#efefef; padding:10px;",
+             selectInput("stockb_highlight", "Highlight", choices = c("None", "Minimum", "Maximum"), selected = "None")
+           )),
+    column(
+      width = 7,
+      p(strong("Sortino Ratios plot")),
+      textOutput("sortino_plot_text"),
+      plotOutput("sortino_plot", width = "100%", height = "600px")),
+    column(width = 1)
+  ),
+  hr(),
+  fluidRow(
+    column(width = 1),
+    
+    column(width = 11, 
+           p("Data of current portfolio return and downside deviation"),
+           tableOutput("data_1"),
+           p("Data of stored sortino ratios"),
+           tableOutput("data_2"))
+  )
+))
+
+
+server.r
+
+
+shinyServer(function(input, output, session) { 
+  
+  # Variables to keep track of
+  rv <- reactiveValues(
+    data          = NULL,
+    sortino_ratio = NULL,
+    sortino_data  = NULL
+  )
+  
+  # Update data based on selections
+  observe({
+    if(!is.na(input$fltr_date[1]) & !is.null(input$target_return)) {
+      min_date <- min(input$fltr_date[1], input$fltr_date[2])
+      max_date <- max(input$fltr_date[1], input$fltr_date[2])
+      
+      rv$data <- left_join(
+        data %>% 
+          filter(company == input$stocka_company,
+                 between(date, min_date, max_date)) %>% 
+          select(date, stocka = company, stocka_exp_rtn = exp_rtn) %>% 
+          mutate(stocka_weight = input$stocka_weight),
+        data %>% 
+          filter(company == input$stockb_company,
+                 between(date, min_date, max_date)) %>% 
+          select(date, stockb = company, stockb_exp_rtn = exp_rtn) %>% 
+          mutate(stockb_weight = input$stockb_weight),
+        by = "date") %>% 
+        mutate(portfolio_return   = 100 * ((stocka_exp_rtn / 100) * (stocka_weight / 100) + (stockb_exp_rtn / 100) * (stockb_weight / 100)),
+               downside_deviation = portfolio_return - input$target_return)
+      
+      lngth <- nrow(rv$data)
+      
+      # rv$sortino_ratio <- round((sqrt(sum((rv$data$portfolio_return/100)^2) / lngth) * 100 - input$target_return) /
+      #   (sqrt(sum((rv$data$downside_deviation/100)^2) / lngth) * 100), 1)
+      
+      rv$sortino_ratio <- round((sqrt(sum((rv$data$portfolio_return^2)/100) / lngth) * 100 - input$target_return) /
+        (sqrt(sum((rv$data$downside_deviation^2)/100) / lngth) * 100), 1)
+    }
+  })
+  
+  # Generate plot for portfolio and downside
+  output$portfolio_plot <- renderPlot({ 
+    if(!is.null(rv$data)) {
+      rv$data %>% 
+        gather(portfolio_return, downside_deviation, key = "key", value = "value") %>% 
+        mutate(value = round(value, 3)) %>% 
+        ggplot(aes(x = date, y = value, colour = key)) +
+          geom_line() + 
+          geom_point() +
+          geom_label(aes(label = value), nudge_y = 0.2) + 
+          scale_x_date(date_breaks = "1 month", date_labels = "%m %Y")
+    } else { NULL }
+  }) 
+  
+  # Generate/Expand sortino ratios data when button is clicked
+  observeEvent(input$add_to_sortino, {
+    if(!is.null(rv$data) & !is.null(rv$sortino_ratio)) {
+      add_df <- rv$data %>% 
+        summarise(stocka        = unique(stocka),
+                  stockb        = unique(stockb),
+                  stocka_weight = unique(stocka_weight),
+                  stockb_weight = unique(stockb_weight),
+                  start_date    = min(date),
+                  end_date      = max (date)) %>% 
+        mutate(target_return = input$target_return,
+               sortino_ratio = rv$sortino_ratio,
+               legend        = paste0(stocka, " (", stocka_weight, ") ",
+                                      stockb, " (", stockb_weight, ") "))
+      if(is.null(rv$sortino_data)) {
+        rv$sortino_data <- add_df
+      } else {
+        rv$sortino_data <- bind_rows(rv$sortino_data, add_df)
+      }
+    }
+  })
+  
+  # Generate sortino ratios plot
+  output$sortino_plot <- renderPlot({ 
+    if(!is.null(rv$sortino_data)) {
+      plot <- rv$sortino_data %>% 
+        mutate(legend = factor(legend)) %>% 
+        ggplot(aes(x = target_return, y = sortino_ratio, color = legend)) + 
+          geom_point(shape = 16, size = 4) +
+          coord_cartesian(xlim = c(1, 12), ylim = c(min(rv$sortino_data$sortino_ratio) - 2, 
+                                                    max(rv$sortino_data$sortino_ratio) + 2)) +
+          scale_x_continuous(breaks = 1:12)
+      if(input$stockb_highlight == "None") {
+        plot
+      } else if(input$stockb_highlight == "Minimum") {
+        plot +
+          geom_hline(yintercept = min(rv$sortino_data$sortino_ratio), linetype = 2)
+      } else if(input$stockb_highlight == "Maximum") {
+        plot +
+          geom_hline(yintercept = max(rv$sortino_data$sortino_ratio), linetype = 2)
+      }
+    } else { NULL }
+  }) 
+  
+  # Return message if no sortino ratio data has been added yet
+  output$sortino_plot_text <- renderText({
+    if(is.null(rv$sortino_data)) {
+      "Please press 'Add to Sortino Ratios plot' button to generate data for the Sortino plot"
+    } else { NULL }
+  })
+   
+  # Return a text output woith the sortino ratio
+  output$sortino_ratio <- renderText({
+    if(!is.null(rv$sortino_ratio)) {
+      paste0("Sortino Ratio = ", rv$sortino_ratio)
+    } else { NULL }
+  })
+  
+  # Portfolio and downside data
+  output$data_1 <- renderTable({
+    rv$data
+  })
+  
+  # Sortino ratio data
+  output$data_2 <- renderTable({
+    rv$sortino_data
+  })
+}) 
