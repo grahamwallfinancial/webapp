@@ -1,0 +1,170 @@
+global.r
+
+library(shiny)
+library(quantmod)
+library(tidyverse)
+library(zoo)
+library(lubridate)
+library(scales)
+
+# ss <- stockSymbols() %>% as_data_frame() %>% 
+#   mutate(opts = paste0(Name, " (", Symbol, ")"))
+# 
+# apple_opts <- ss %>% 
+#   filter(Symbol == "AAPL") %>% 
+#   select(opts) %>% 
+#   `[[`(1)
+
+sources <- c("yahoo", "google")
+# sources <- c("yahoo", "google", "MySQL", "FRED", "csv", "RData", "oanda")
+
+
+
+
+
+
+server.r 
+
+
+shinyServer(function(input, output, session) {
+
+  # Storing the data 
+  stock <- reactiveValues(
+    data = NULL,
+    edge = NULL,
+    buy  = NULL,
+    sell = NULL
+  )
+  
+  # Listen to the source input
+  observeEvent(input$source, {
+    
+    # Load the data
+    getSymbols("AAPL", src = input$source)
+
+    # Mutate to data frame
+    stock$data <- bind_cols(
+      data_frame(Date = index(AAPL)),
+      as_data_frame(AAPL))
+  })
+  
+  # Calculate edge for selected period
+  observeEvent(input$apply, {
+    if(!is.null(stock$data) & !is.null(input$rollmean)) {
+      # Filter dates, select columns and calculate rolling mean (edge)
+      stock$edge <- stock$data %>% 
+        select(Date, AAPL.Close) %>% 
+        mutate(edge = rollmean(AAPL.Close, input$rollmean, na.pad = TRUE, align = "right"))
+      
+      buy_sell <- stock$edge %>% 
+        mutate(action = if_else(AAPL.Close < edge, TRUE, FALSE),
+               action = action - lag(action),
+               action = if_else(action == -1, "Sell",
+                                if_else(action == 1, "Buy", NA_character_)))
+      stock$buy  <- filter(buy_sell, action == "Buy") 
+      stock$sell <- filter(buy_sell, action == "Sell") 
+    }
+  })
+
+  # Some browser don't respect maximum and minimum for keyboard input. This is solution
+  observeEvent(input$rollmean, {
+    if(!is.na(input$rollmean)) {
+      if(input$rollmean < 1){
+        updateNumericInput(session, "rollmean", value = 1)
+      } else if(input$rollmean > 2617) {
+        updateNumericInput(session, "rollmean", value = 2617)
+      }
+    }
+  })
+  
+  # Generate filter UI
+  output$fltr_date_ui <- renderUI({
+    if(!is.null(stock$data)) {
+      # date range of data
+      date_min <- min(stock$data$Date)
+      date_max <- max(stock$data$Date)
+      
+      # Create date range input
+      rtrn <- dateRangeInput("fltr_date", "Choose date range", 
+                             min = date_min, max = date_max,
+                             start = date_min, end = date_max)
+    } else {
+      rtrn <- NULL
+    }
+    rtrn
+  })
+  
+  # Always force the second date to be at least equal to first date.
+  observeEvent(input$fltr_date[2], {
+    end_date = input$fltr_date[2]
+    # If end date is earlier than start date, update the end date to be the same as the new start date
+    if (input$fltr_date[2] < input$fltr_date[1]) {
+      end_date = input$fltr_date[1]
+    }
+    updateDateRangeInput(session,"fltr_date", start=input$date_range[1], end=end_date)
+  })
+  
+  # Generate plot
+  output$edge_plot <- renderPlot({
+    if(!is.null(stock$edge) & !is.null(stock$buy) & !is.null(input$fltr_date)) {
+
+      data <- stock$edge %>% 
+        filter(between(Date, input$fltr_date[1], input$fltr_date[2]))
+      
+      y_label_buy <- max(data$AAPL.Close) - 0.1 * (max(data$AAPL.Close) - min(data$AAPL.Close))
+      y_label_sell <- max(data$AAPL.Close) - 0.05 * (max(data$AAPL.Close) - min(data$AAPL.Close))
+      x_nudge <- as.integer(abs(input$fltr_date[2] - input$fltr_date[1])) / 100
+      
+      buy  <- filter(stock$buy, between(Date, input$fltr_date[1], input$fltr_date[2]))
+      sell <- filter(stock$sell, between(Date, input$fltr_date[1], input$fltr_date[2]))
+      
+      # Generate plot
+        ggplot(data = data, aes(x =Date)) + 
+          theme_minimal() +
+          geom_point(aes(y = AAPL.Close), colour = "steelblue", size = 1) +
+          geom_line(aes(y = AAPL.Close, col = "Stock Closing Value")) +
+          geom_line(aes(y = edge, col = "Edge"), size = 1) + 
+          scale_color_manual(values=c("Edge"="orange", "Stock Closing Value"="steelblue")) +
+          ylab("Daily Stock Closing Value") + 
+          geom_vline(data = buy, aes(xintercept = as.numeric(Date)), 
+                     col = "darkred", alpha = 0.6) +
+          geom_text(data = buy, aes(x = Date, y = y_label_buy, label = action), 
+                    angle = 90, col = "darkred", nudge_x = - x_nudge, alpha = 0.6) +
+          geom_vline(data = sell, aes(xintercept = as.numeric(Date)), 
+                     col = "darkgreen", alpha = 0.6) +
+          geom_text(data = sell, aes(x = Date, y = y_label_sell, label = action), 
+                    angle = 90, col = "darkgreen", nudge_x = - x_nudge, alpha = 0.6) 
+          
+    } else { NULL }
+  })
+
+})
+
+
+ui.r
+
+
+shinyUI(fluidPage(
+
+  p(""),
+  fluidRow(
+    column(width = 2),
+    column(width = 10, h2("Edge Test"))
+  ),
+  hr(),
+  fluidRow(
+    column(width = 1),
+    column(
+      width = 3,
+      selectInput("source", "Data source", choices = sources, selected = "google"),
+      uiOutput("fltr_date_ui"),
+      numericInput("rollmean", "Edge Parameter", 
+                   value = 300, min = 1, max = 2617, step  = 1),
+      actionButton("apply", "Show/Update Plot")
+    ),
+    column(
+      width = 7,
+      plotOutput("edge_plot", width = "100%", height = "600px")),
+    column(width = 1)
+  )
+))
