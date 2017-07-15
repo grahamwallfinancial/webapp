@@ -1,0 +1,62 @@
+[insert_php]
+
+$host = "localhost";
+$user = "root";
+$password = "";
+$db = "wordpress";
+
+$con = mysqli_connect($host, $user, $password, $db);
+
+$DeleteQuery = "delete from table_calls;";
+$DeleteResult = mysqli_query($con,$DeleteQuery) or die (mysqli_error($con));
+
+$DeleteQuery2 = "delete from table_puts;";
+$DeleteResult2 = mysqli_query($con,$DeleteQuery2) or die (mysqli_error($con));
+
+$url = "http://www.google.com/finance/option_chain?q=AAPL&output=json";
+	$data = @file_get_contents($url);
+	
+//Regular Expression code below
+	$pattern = '@(\w+:)(\d+\.?\d*)@';
+	$replace = '$1"$2"';
+	
+	$data = preg_replace($pattern,$replace,$data);
+	
+	$pattern = '@(\w+):@';
+	$replace = '"$1":';
+	
+	$data = preg_replace($pattern,$replace,$data);
+
+	//Following statement converts the data retrieved into JSON format
+    $jsondata = json_decode($data,true);	
+
+//looping through the data	
+	foreach ($jsondata["calls"] as $result) {
+			$strike = $result["strike"];
+			$oi = $result["oi"];	
+
+	$InsertQuery = "Insert into table_calls (strike, oi) values ('$strike', '$oi');";
+	$InsertResult = mysqli_query($con,$InsertQuery);
+}
+
+//looping through the data
+foreach ($jsondata["puts"] as $result2) {
+			$strike2 = $result2["strike"];
+			$oi2 = $result2["oi"];	
+
+	$InsertQuery2 = "Insert into table_puts (strike, oi) values ('$strike2', '$oi2');";
+	$InsertResult2 = mysqli_query($con,$InsertQuery2);
+}
+
+echo "Calls:";
+[/insert_php]
+
+[tablemaster sql="SELECT strike as 'Strike', oi as 'Open Interest' FROM table_calls" columns="Strike,Open Interest"]
+
+
+[insert_php]
+echo "Puts:";
+[/insert_php]
+
+
+[tablemaster sql="SELECT strike as 'Strike', oi as 'Open Interest' FROM table_puts" columns="Strike,Open Interest"]
