@@ -1,0 +1,410 @@
+global.R
+
+library(shiny)
+library(RColorBrewer)
+library(scales)
+library(tidyverse)
+library(plotly)
+library(RCurl)
+library(jsonlite)
+library(plyr)
+
+getOptionQuotes = function(symbol) {
+  fixJSON = function(json){
+    gsub('([^,{:]+):', '"\\1":', json)
+  }
+  URL1 = 'http://www.google.com/finance/option_chain?q=%s&output=json'
+  URL2 = paste0(URL1, '&expy=%d&expm=%d&expd=%d')
+  
+  url = sprintf(URL1, symbol)
+  chain = fromJSON(fixJSON(getURL(url)))
+  options = mlply(chain$expirations, function(y, m, d) {
+    url = sprintf(URL2, symbol, y, m, d)
+    expiry = fromJSON(fixJSON(getURL(url)))
+    expiry$calls$type = "Call"
+    expiry$puts$type  = "Put"
+    
+    prices = rbind(expiry$calls, expiry$puts)
+    prices$expiry = sprintf("%4d-%02d-%02d", y, m, d)
+    prices$underlying.price = expiry$underlying_price
+    prices$retrieved = Sys.time()
+    prices
+  })
+  
+  options = options[sapply(options, class) == "data.frame"]
+  options = cbind(data.frame(symbol), rbind.fill(options))
+  options = rename(options, c(p="premium", b="bid", a="ask", oi="open.interest"))
+  for (col in c("strike", "premium", "bid", "ask"))
+    options[, col] = suppressWarnings(as.numeric(options[, col]))
+  options[, "open.interest"] = suppressWarnings(as.integer(options[, "open.interest"]))
+  col.order = c("symbol", "type", "expiry", "strike", "premium",
+                "bid", "ask", "open.interest", "retrieved")
+  options[, col.order]
+}
+
+# try <- try(AAPL <- getOptionQuotes(symbol = "AAPL"))
+# if("try-error" %in% class(try)) {
+#   # If error in loading data simply use old one
+#   AAPL <- readRDS("AAPL.Rds")
+# } else {
+#   # Remove milli second differences in time
+#   AAPL$retrieved <- as.POSIXct(strptime(AAPL$retrieved, "%Y-%m-%d %H:%M:%S"))
+#   # Load previous AAPL data
+#   AAPL_old <- readRDS("AAPL.Rds")
+#   # If new data is different add it to old and store it, otherwise continue with old data
+#   if(max(AAPL_old$retrieved) != max(AAPL$retrieved)) {
+#     AAPL <- bind_rows(AAPL_old, AAPL)
+#     saveRDS(AAPL, "AAPL.Rds")
+#   } else {
+#     AAPL <- readRDS("AAPL.Rds")
+#   }
+# }
+
+data <- readRDS("AAPL.Rds") # %>% 
+#   dplyr::group_by(retrieved, expiry, strike) %>% 
+#   dplyr::mutate(open.interest = sum(open.interest)) %>% 
+#   dplyr::ungroup()
+
+retrieved <- unique(data$retrieved)
+expiry    <- unique(data$expiry)
+
+auto_refresh <- c("15m" = 15, "30m" = 30, "45m" = 45, 
+                  "1h" = 60, "2h" = 120, "4h" = 240, "6h" = 360, "12h" = 720, "24h" = 1440)
+
+
+server.R
+
+shinyServer(function(input, output, session) { 
+  
+  # Reactive variables
+  rv <- reactiveValues(database   = data,
+                       data       = data,
+                       retrieved  = retrieved,
+                       expiry     = expiry,
+                       expiry_ch  = expiry,
+                       play       = FALSE,
+                       retr_frame = retrieved[1],
+                       ani_speed  = 2000,
+                       load_msg   = NULL,
+                       refresh_r  = as.numeric(auto_refresh[1]))
+  
+  # Generate checkbox input based on current expiry options
+  output$expiry_ui <- renderUI({
+    checkboxGroupInput("expiry", "Expiry", inline = TRUE,
+                       choices = rv$expiry, selected = rv$expiry_ch)
+  })
+  
+  # Update expiry based on options
+  observeEvent(input$expiry, {
+    rv$expiry_ch <- input$expiry
+  })
+  
+  output$add_data <- renderUI({
+    rv$data
+    
+    db_r <- unique(as.POSIXct(strptime(rv$database$retrieved, "%Y-%m-%d %H:%M"))) # Get data from global.R (global environment)
+    dt_r <- isolate(unique(as.POSIXct(strptime(rv$data$retrieved, "%Y-%m-%d %H:%M"))))
+    add  <- which(db_r != dt_r)
+    
+    ui <- list(
+      HTML("<center>DATA STORAGE</center>"),
+      p(""),
+      fluidRow(
+        column(width = 4, 
+               p("Timestamps stored in the database:"),
+               tags$ul(map(db_r, tags$li))),
+        column(width = 4, 
+               p("Timestamps curently in the App:"),
+               tags$ul(map(dt_r, tags$li))),
+        column(width = 4, 
+               p("Timestamps not part of the database:"),
+               tags$ul(map(dt_r[add], tags$li)),
+               if(length(add) != 0) actionButton("add_data", "ADD TO DATABASE"))
+      )
+    )
+    
+    # Return ui element
+    ui
+  })
+  
+  # Store data in database and set database reactive value
+  observeEvent(input$add_data, {
+    saveRDS(rv$data, "AAPL.Rds")
+    rv$database <- rv$data
+  })
+  
+  observe({
+    # Respond to button
+    input$refresh_now
+
+    # Do not run until refresh rate has been initialised
+    if(!is.null(input$refresh_rate)) {
+      
+      # Nothing else should be reacted to
+      isolate({
+        # If the refresh rate was reset do not run the main code, only change the reactive value
+        if(rv$refresh_r != input$refresh_rate) {
+          rv$refresh_r <- input$refresh_rate
+        } else {
+          try <- try(AAPL <- getOptionQuotes(symbol = "AAPL"))
+          if("try-error" %in% class(try)) {
+            rv$load_msg <- NULL
+            rv$load_msg <- "Unable to load data at the moment"
+          } else {
+            rv$load_msg <- NULL
+            
+            # # Remove milli second differences in time
+            # AAPL$retrieved <- as.POSIXct(strptime(AAPL$retrieved, "%Y-%m-%d %H:%M:%S"))
+            # Make all timestamps the exact same
+            AAPL$retrieved <- min(as.POSIXct(strptime(AAPL$retrieved, "%Y-%m-%d %H:%M:%S")))
+            
+            data <- AAPL %>%
+              dplyr::group_by(retrieved, expiry, strike) %>%
+              dplyr::mutate(open.interest = sum(open.interest)) %>%
+              dplyr::ungroup()
+            
+            # If new data is different add it to old and store it, otherwise continue with old data
+            if(max(rv$data$retrieved) != max(data$retrieved)) {
+              rv$data      <- bind_rows(rv$data, data)
+              rv$expiry    <- unique(rv$data$expiry)
+              rv$retrieved <- unique(rv$data$retrieved)
+            } 
+          }
+        }
+        # Respond to timer
+        invalidateLater(60000 * as.numeric(input$refresh_rate), session)
+      })
+    }
+  })
+  
+  # # Generate plot
+  # output$plotly_viz <- renderPlotly({
+  #   if(!is.null(rv$expiry)){
+  #     
+  #     p <- rv$data %>% 
+  #       dplyr::filter(expiry %in% rv$expiry_ch)
+  #     
+  #     max_y <- p %>% 
+  #       dplyr::group_by(retrieved, strike) %>% 
+  #       dplyr::summarise(sum = as.double(sum(open.interest))) %>% 
+  #       dplyr::ungroup() %>% 
+  #       select(sum) %>% max
+  #     
+  #     p <- p %>% 
+  #       dplyr::mutate(retrieved = factor(as.POSIXct(strptime(retrieved, "%Y-%m-%d %H:%M"))),
+  #                     expiry    = factor(expiry),
+  #                     type      = factor(type)) %>% 
+  #       plot_ly(x = ~strike, y = ~open.interest) %>% 
+  #       layout(yaxis = list(title = 'Call + Put (open interest)', range = c(0, max_y)), 
+  #              xaxis = list(title = "Strike"),
+  #              barmode = 'stack') %>% 
+  #       add_bars(frame = ~retrieved, color= ~expiry) %>% 
+  #       animation_opts(2000)
+  #     
+  #     p
+  #   } else { NULL }
+  # })
+
+  # ANIMATION BUTTONs
+  
+  output$sel_retrieved_ui <- renderUI({
+    # Check unique values for timestamp
+    uni <- unique(rv$data$retrieved)
+
+    # Return radiobutton
+    radioButtons("sel_retrieved", "Current Timestamp (manipulate with animation buttons)",
+                 choices  = uni,
+                 selected = uni[1])
+  })
+
+  # Update radiobutton to what is shown
+  observeEvent(rv$retr_frame, {
+    updateRadioButtons(session, "sel_retrieved", selected = rv$retr_frame)
+  })
+  
+  # Play plays, or resets to start when already playing
+  observeEvent(input$play, {
+    if(rv$play) {
+      rv$retr_frame <- rv$retrieved[1]
+    } else {
+      rv$play <- TRUE
+    }
+  })
+  
+  # Invalidate checks if play is true to set the next frame
+  observe({
+    isolate({
+      if(rv$play) {
+        frm <- which(rv$retr_frame == rv$retrieved)
+        if(frm < length(rv$retrieved)) rv$retr_frame <- rv$retrieved[frm + 1]
+      }
+    })
+    invalidateLater(rv$ani_speed, session)
+  })
+  
+  # Pause sets play to FALSE
+  observeEvent(input$pause, {
+    rv$play <- FALSE
+  })
+  
+  # Backward sets frame to previous and pauses
+  observeEvent(input$backward, {
+    rv$play <- FALSE
+    frm <- which(rv$retr_frame == rv$retrieved)
+    if(frm > 1) rv$retr_frame <- rv$retrieved[frm - 1]
+  })
+  
+  # Forward sets frame to next and pauses
+  observeEvent(input$forward, {
+    rv$play <- FALSE
+    frm <- which(rv$retr_frame == rv$retrieved)
+    if(frm < length(rv$retrieved)) rv$retr_frame <- rv$retrieved[frm + 1]
+  })
+  
+  # Speed up
+  observeEvent(input$plus, {
+    if(rv$ani_speed >= 800) rv$ani_speed = rv$ani_speed - 200
+  })
+  
+  # Slow down
+  observeEvent(input$minus, {
+    if(rv$ani_speed < 10000)  rv$ani_speed = rv$ani_speed + 200
+  })
+  
+  # Reset
+  observeEvent(input$reset, {
+    rv$play       <- FALSE
+    rv$retr_frame <- rv$retrieved[1]
+    rv$ani_speed  <- 2000
+  })
+  
+  # Generate plots
+  plotlys <- reactive({
+    if(!is.null(rv$data)) {
+      p <- rv$data %>%
+        dplyr::filter(expiry %in% rv$expiry_ch) %>% 
+        dplyr::mutate(expiry    = factor(expiry),
+                      type      = factor(type))
+      
+      max_y <- p %>%
+        dplyr::group_by(retrieved, strike) %>%
+        dplyr::summarise(sum = as.double(sum(open.interest))) %>%
+        dplyr::ungroup() %>%
+        select(sum) %>% max
+      
+      p <- tibble(retrieved = unique(rv$data$retrieved)) %>%
+        mutate(plotly = map(retrieved,
+                            function(retr) {
+                              p %>%
+                                dplyr::filter(retrieved == retr) %>%
+                                plot_ly(x = ~strike, y = ~open.interest, type = "bar", color = ~expiry) %>%
+                                layout(yaxis = list(title = 'Call + Put (open interest)', range = c(0, max_y)),
+                                       xaxis = list(title = "Strike"),
+                                       barmode = 'stack')
+                            }))
+      
+      p
+    } else { p <- NULL }
+    p
+  })
+  
+  # # Render ui to avoid random error 
+  # output$plotly_viz_ui <- renderUI({
+  #   if(!is.null(rv$data)) {
+  #   if(!is.null(plotlys()) & !is.null(rv$retr_frame)){
+  #     plotlyOutput("plotly_viz", width = "100%", height = "600px")
+  #   }
+  #   NULL
+  # })
+  
+  # Return plot to ui
+  output$plotly_viz <- renderPlotly({
+    if(!is.null(plotlys()) & !is.null(rv$retr_frame)){
+      plot <- plotlys() %>%
+        filter(retrieved == rv$retr_frame) %>%
+        select(plotly)
+      plot <- plot$plotly[[1]]
+    } else { 
+      # RenderPlotly can't handle NULL 
+      p <- rv$data %>%
+        dplyr::filter(expiry %in% rv$expiry_ch,
+                      retrieved == rv$retrieved[1]) %>%
+        dplyr::mutate(expiry    = factor(expiry),
+                      type      = factor(type))
+
+      max_y <- p %>%
+        dplyr::group_by(retrieved, strike) %>%
+        dplyr::summarise(sum = as.double(sum(open.interest))) %>%
+        dplyr::ungroup() %>%
+        select(sum) %>% max
+
+      plot <- p %>% 
+        plot_ly(x = ~strike, y = ~open.interest, type = "bar", color = ~expiry) %>%
+        layout(yaxis = list(title = 'Call + Put (open interest)', range = c(0, max_y)),
+               xaxis = list(title = "Strike"),
+               barmode = 'stack')
+    }
+    plot
+  })
+})
+
+
+ui.R
+
+shinyUI(fluidPage(
+
+  p(""),
+  fluidRow(
+    column(width = 4),
+    column(width = 8, h2("Stock Market Analysis"))
+  ),
+  hr(),
+  fluidRow(
+    column(width = 2),
+    column(width = 8,
+           fluidRow(column(width = 7),
+                    column(width = 3, 
+                           div(p("Auto refresh data every "),
+                               style = "float:left;"),
+                           div(selectInput("refresh_rate", NULL, 
+                                           choices  = auto_refresh, 
+                                           selected = auto_refresh[1],
+                                           width    = "80px"),
+                               style = "float:left; width:85p")),
+                    column(width = 2, actionButton("refresh_now", "Refresh now"))
+           ),
+           fluidRow(column(width = 7),
+                    column(width = 5, hr())
+           ),
+           fluidRow(column(width = 1),
+                    column(width = 11, uiOutput("expiry_ui"))
+           ),
+           # uiOutput("plotly_viz_ui"),
+           plotlyOutput("plotly_viz", width = "100%", height = "600px"),
+           div(
+             style = "border:1px solid black; padding:10px;",
+             HTML("<center>ANIMATION</center>"),
+             p(""),
+             fluidRow(
+               column(width = 4, uiOutput("sel_retrieved_ui")),
+               column(width = 4, 
+                      div(style = "float:left; padding:2px;", actionButton("play", NULL, icon = icon("play"))),
+                      div(style = "float:left; padding:2px;", actionButton("pause", NULL, icon = icon("pause"))),
+                      div(style = "float:left; padding:2px;", actionButton("backward", NULL, icon = icon("backward"))),
+                      div(style = "float:left; padding:2px;", actionButton("forward", NULL, icon = icon("forward")))
+               ),
+               column(width = 3, 
+                      div(style = "float:left; padding:2px;", p("Speed")),
+                      div(style = "float:left; padding:2px;", actionButton("plus", NULL, icon = icon("plus"))),
+                      div(style = "float:left; padding:2px;", actionButton("minus", NULL, icon = icon("minus")))
+               ),
+               column(width = 1, div(style = "float:left;", actionButton("reset", "Reset")))
+             )
+           ),
+           p(""),
+           div(uiOutput("add_data"), style = "border:1px solid black; padding:10px;")
+    ),
+    column(width = 2)
+  ),
+  p("")
+))
