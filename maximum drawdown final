@@ -1,0 +1,299 @@
+global.r
+
+library(shiny)
+library(quantmod)
+library(tidyverse)
+library(zoo)
+library(lubridate)
+library(scales)
+
+# ss <- stockSymbols() %>% as_data_frame() %>% 
+#   mutate(opts = paste0(Name, " (", Symbol, ")"))
+# 
+# apple_opts <- ss %>% 
+#   filter(Symbol == "AAPL") %>% 
+#   select(opts) %>% 
+#   `[[`(1)
+
+sources <- c("yahoo", "google")
+# sources <- c("yahoo", "google", "MySQL", "FRED", "csv", "RData", "oanda")
+
+stock <- c("AAPL", "GOOG", "FB", "AMZN", "MSFT")
+
+server.r
+
+
+shinyServer(function(input, output, session) {
+
+  # Storing the data 
+  stock <- reactiveValues(
+    data = NULL,
+    mdd  = NULL
+  )
+  
+  # Listen to the source input
+  observeEvent({
+    input$source 
+    input$stock
+  }, {
+    
+    # Load the data
+    getSymbols(input$stock, src = input$source)
+    
+    # Mutate to data frame
+    if(input$stock == "AAPL") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(AAPL)),
+        as_data_frame(AAPL))
+    } else if(input$stock == "GOOG") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(GOOG)),
+        as_data_frame(GOOG))
+    } else if(input$stock == "FB") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(FB)),
+        as_data_frame(FB))
+    } else if(input$stock == "AMZN") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(AMZN)),
+        as_data_frame(AMZN))
+    } else if(input$stock == "MSFT") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(MSFT)),
+        as_data_frame(MSFT))
+    }
+    
+    names(stock$data) <- c("Date", "Open", "High", "Low", "Close", "Volume")
+    
+    # Calculate mdd
+    stock$mdd <- stock$data %>% 
+      # Find the peaks
+      mutate(peak = cummax(Close)) %>% 
+      # Group by peak (data between peak and next peak)
+      group_by(peak) %>% 
+      # Calculate draw down
+      mutate(dd  = (min(Close) - peak)/peak) %>% 
+      ungroup() %>% 
+      # Find the maximum draw down up to then
+      mutate(mdd = cummin(dd)) # %>% 
+      # # Transform to long data for plotting with facets
+      # gather(Close, dd, mdd, key = "key", value = "value")
+  })
+  
+  # Calculate dd and mdd for selected period
+  observeEvent(input$fltr_date_action, {
+    if(!is.null(stock$data) & !is.null(input$fltr_date)) {
+      stock$mdd <- stock$data %>% 
+        filter(between(Date, input$fltr_date[1], input$fltr_date[2])) %>% 
+        # Find the peaks
+        mutate(peak = cummax(Close)) %>% 
+        # Group by peak (data between peak and next peak)
+        group_by(peak) %>% 
+        # Calculate draw down
+        mutate(dd  = (min(Close) - peak)/peak) %>% 
+        ungroup() %>% 
+        # Find the maximum draw down up to then
+        mutate(mdd = cummin(dd)) # %>% 
+        # # Transform to long data for plotting with facets
+        # gather(Close, dd, mdd, key = "key", value = "value")
+    }
+  })
+  
+  # Calculate dd and mdd for selected period
+  observeEvent(input$month_year_action, {
+    if(!is.null(stock$data) & !is.null(input$from_Month)) {
+      # Turn selection into dates
+      date_1 <- dmy(paste0("1-", input$from_Month, "-", input$from_Year))
+      date_2 <- dmy(paste0("1-", input$to_Month, "-", input$to_Year))
+      
+      stock$mdd <- stock$data %>% 
+        filter(between(Date, min(date_1, date_2), max(date_1, date_2))) %>% 
+        # Find the peaks
+        mutate(peak = cummax(Close)) %>% 
+        # Group by peak (data between peak and next peak)
+        group_by(peak) %>% 
+        # Calculate draw down
+        mutate(dd  = (min(Close) - peak)/peak) %>% 
+        ungroup() %>% 
+        # Find the maximum draw down up to then
+        mutate(mdd = cummin(dd)) # %>% 
+        # # Transform to long data for plotting with facets
+        # gather(Close, dd, mdd, key = "key", value = "value")
+    }
+  })
+
+  
+  # Generate filter UI
+  output$fltr_date_ui <- renderUI({
+    if(!is.null(stock$data)) {
+      # date range of data
+      date_min <- min(stock$data$Date)
+      date_max <- max(stock$data$Date)
+      
+      months  <- month.name
+      years   <- year(date_min):year(date_max)
+      month_1 <- month(date_min)
+      
+      # Create date range input
+      rtrn <- list(
+        hr(),
+        p(strong("Two options to choose the date range:")),
+        dateRangeInput("fltr_date", "1) Choose date range", 
+                       min = date_min, max = date_max,
+                       start = date_min, end = date_max),
+        fluidRow(
+          column(width = 6),
+          column(width = 6, actionButton("fltr_date_action", "Apply Date Range"))
+        ),
+        p(strong("2) Select months and years")),
+        fluidRow(
+          column(width = 3, selectInput("from_Month", "From Month", choices = months, selected = months[month(date_min)])),
+          column(width = 3, selectInput("from_Year", "From Year", choices = years, selected = year(date_min))),
+          column(width = 3, selectInput("to_Month", "To Month", choices = months, selected = months[month(date_max)])),
+          column(width = 3, selectInput("to_Year", "To Year", choices = years, selected = year(date_max)))
+        ),
+        fluidRow(
+          column(width = 6),
+          column(width = 6, actionButton("month_year_action", "Apply Selection"))
+        ),
+        hr()
+      )
+    } else {
+      rtrn <- NULL
+    }
+    rtrn
+  })
+  
+  # Always force the second date to be at least equal to first date.
+  observeEvent(input$fltr_date[2], {
+    end_date = input$fltr_date[2]
+    # If end date is earlier than start date, update the end date to be the same as the new start date
+    if (input$fltr_date[2] < input$fltr_date[1]) {
+      end_date = input$fltr_date[1]
+    }
+    updateDateRangeInput(session,"fltr_date", start=input$date_range[1], end=end_date)
+  })
+  
+  # Generate plot
+  output$mdd_plot <- renderPlot({
+    if(!is.null(stock$mdd)) {
+      
+      mdd <- stock$mdd %>% 
+        filter(dd == min(dd)) %>% 
+        filter((Close == max(Close) | Close == min(Close)))
+      # Set data for arrow
+      mdd_arrow <- tibble(
+        x1  = mdd$Date[1] + (mdd$Date[2] - mdd$Date[1]) / 2,
+        x2  = x1,
+        y1  = mdd$Close[1],
+        y2  = mdd$Close[2],
+        key = "Close"
+      )
+      # Set dataframe with values for horizontal dotted lines
+      mdd_hline <- tibble(
+        x1  = c(mdd$Date[1], mdd$Date[2] - (mdd$Date[2] - mdd$Date[1]) / 2),
+        x2  = c(mdd$Date[1] + (mdd$Date[2] - mdd$Date[1]) / 2, mdd$Date[2]),
+        y1  = c(mdd$Close[1], mdd$Close[2]),
+        y2  = y1,
+        key = "Close"
+      )
+      # Set data for mdd text
+      mdd_text <- tibble(x     = mdd$Date[1] + (mdd$Date[2] - mdd$Date[1]) / 2, 
+                         y     = mdd$Close[1] + max(stock$mdd$Close) / 40, 
+                         label = paste("MDD is", round(mdd$dd[1], 3)),
+                         key   = "Close")
+      
+      stock$mdd %>%
+        gather(Close, mdd, key = "key", value = "value") %>% 
+        ggplot(aes(x = Date, y = value, group = factor(key))) +
+          theme_light() +
+          theme(axis.title.y = element_blank()) +
+          geom_line(colour = "steelblue") +
+          geom_segment(data = mdd_hline, 
+                       aes(x = x1, xend = x2, y = y1, yend = y2),
+                       colour = "darkred",
+                       linetype = 2) +
+          geom_segment(data = mdd_arrow, 
+                       aes(x = x1, xend = x2, y = y1, yend = y2),
+                       colour = "darkred",
+                       size = 1,
+                       arrow = arrow(length = unit(0.1, "inches"), ends = "both")) +
+          geom_text(data = mdd_text, aes(x = x, y = y, label = label)) +
+          expand_limits(y = 0) + 
+          facet_grid(key ~ ., 
+                     scales   = "free_y", 
+                     labeller = as_labeller(c(Close = 'Daily Close',
+                                              mdd = 'Maximum Draw Down')))
+      
+      # stock$mdd %>%
+      #   ggplot(aes(x = Date, y = Close)) +
+      #   theme_light() +
+      #   theme(axis.title.y = element_blank()) +
+      #   geom_line(colour = "steelblue") +
+      #   geom_segment(data = mdd_hline, 
+      #                aes(x = x1, xend = x2, y = y1, yend = y2),
+      #                colour = "darkred",
+      #                linetype = 2) +
+      #   geom_segment(data = mdd_arrow, 
+      #                aes(x = x1, xend = x2, y = y1, yend = y2),
+      #                colour = "darkred",
+      #                size = 1,
+      #                arrow = arrow(length = unit(0.1, "inches"), ends = "both")) +
+      #   geom_text(data = mdd_text, aes(x = x, y = y, label = label)) +
+      #   expand_limits(y = 0)
+      
+    } else { NULL }
+  })
+
+})
+
+
+ui.r
+
+
+shinyUI(fluidPage(
+
+  tags$head(tags$style(
+    HTML('
+         body {
+         background-color: #343434;
+         }
+         
+         #sidebar {
+         background-color: #888888;
+         margin:0px;
+         }
+
+         #mainpanel {
+         background-color: #343434;
+         margin:0px;
+         }
+
+         body, label, input, button, select { 
+         font-family: "Arial";
+         }')
+  )),
+  
+  div(
+    titlePanel("Maximum Draw Down"),
+    style = "color:#bebebe;"
+  ),
+
+  sidebarLayout(
+    
+    # Sidebar with a slider input
+    sidebarPanel(
+      id = "sidebar",
+      selectInput("stock", "Stock", choices = stock, selected = "AAPL"),
+      selectInput("source", "Data source", choices = sources, selected = "google"),
+      uiOutput("fltr_date_ui") # ,
+      # radioButtons("dd_mdd", "Analysis", choices = c("Draw Down", "Maximum Draw Down"), inline = TRUE)
+    ),
+    
+    # Show a plot of the generated distribution
+    mainPanel(
+      id = "mainpanel",
+      plotOutput("mdd_plot", width = "100%", height = "600px")
+    )
+  )
+))
