@@ -1,0 +1,350 @@
+global.r
+
+library(shiny)
+library(quantmod)
+library(tidyverse)
+library(zoo)
+library(lubridate)
+library(scales)
+library(stringr)
+
+# ss <- stockSymbols() %>% as_data_frame() %>% 
+#   mutate(opts = paste0(Name, " (", Symbol, ")"))
+# 
+# apple_opts <- ss %>% 
+#   filter(Symbol == "AAPL") %>% 
+#   select(opts) %>% 
+#   `[[`(1)
+
+sources <- c("yahoo", "google")
+# sources <- c("yahoo", "google", "MySQL", "FRED", "csv", "RData", "oanda")
+
+stock <- c("AAPL", "GOOG", "FB", "AMZN", "MSFT")
+
+server.r
+
+
+shinyServer(function(input, output, session) {
+
+  # Storing the data 
+  stock <- reactiveValues(
+    data          = NULL,
+    cagr          = NULL,
+    plot_data     = NULL,
+    avg_dd        = NULL,
+    avg_cagr      = NULL,
+    mdd           = NULL,
+    sterling      = NULL,
+    sterling_data = NULL,
+    highlight     = "None"
+  )
+  
+  # Listen to the source input
+  observeEvent({
+    input$source 
+    input$stock
+    }, {
+    
+    # Load the data
+    getSymbols(input$stock, src = input$source)
+
+    # Mutate to data frame
+    if(input$stock == "AAPL") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(AAPL)),
+        as_data_frame(AAPL))
+    } else if(input$stock == "GOOG") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(GOOG)),
+        as_data_frame(GOOG))
+    } else if(input$stock == "FB") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(FB)),
+        as_data_frame(FB))
+    } else if(input$stock == "AMZN") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(AMZN)),
+        as_data_frame(AMZN))
+    } else if(input$stock == "MSFT") {
+      stock$data <- bind_cols(
+        data_frame(Date = index(MSFT)),
+        as_data_frame(MSFT))
+    }
+    
+    names(stock$data) <- c("Date", "Open", "High", "Low", "Close", "Volume")
+      
+    # Calculate cagr data
+    stock$cagr <- stock$data %>%
+      select(Date, 
+             t_0    = Close) %>% 
+      mutate(Date_0 = Date,
+             Date_n = lead(Date_0),
+             t_n    = lead(t_0),
+             cagr   = round(100 * ((t_n / t_0)^(1 / 252) - 1), 3)) %>% 
+      filter(!is.na(cagr))
+  })
+  
+  # Calculate cagr for selected period
+  observe({
+    if(!is.null(stock$cagr) & !is.null(input$fltr_date)) {
+      # Subset columns and group by week and year
+      stock$plot_data <- stock$cagr %>% 
+        filter(between(Date, input$fltr_date[1], input$fltr_date[2]))
+      
+      mdd <- stock$data %>% 
+        filter(between(Date, input$fltr_date[1], input$fltr_date[2])) %>%
+        # Find the peaks
+        mutate(peak = cummax(Close)) %>% 
+        # Group by peak (data between peak and next peak)
+        group_by(peak) %>% 
+        # Calculate draw down
+        mutate(dd  = (peak - min(Close))/peak) %>% 
+        ungroup() 
+      
+      # Calculate mdd
+      stock$mdd <- max(mdd$dd)
+      
+      # Aerage CAGR
+      stock$avg_cagr <- mean(stock$plot_data$cagr)
+      
+      # Calculate sterling ratio (mdd minus 10%)
+      stock$sterling <- stock$avg_cagr / (stock$mdd * 0.9)
+    }
+  })
+
+  
+  # Generate filter UI
+  output$fltr_date_ui <- renderUI({
+    if(!is.null(stock$data)) {
+      # date range of data
+      date_min   <- min(stock$data$Date)
+      date_max   <- max(stock$data$Date)
+      date_start <- if_else(date_max - 30 > date_min, date_max - 30, date_min)
+      
+      # Create date range input
+      rtrn <- list(
+        div(p(strong("Choose date range")), style = "color:#efefef"),
+        dateRangeInput("fltr_date", NULL, 
+                       min = date_min, max = date_max,
+                       start = date_start, end = date_max)
+      )
+    } else {
+      rtrn <- NULL
+    }
+    rtrn
+  })
+  
+  # Always force the second date to be at least equal to first date.
+  observeEvent(input$fltr_date[2], {
+    end_date = input$fltr_date[2]
+    # If end date is earlier than start date, update the end date to be the same as the new start date
+    if (input$fltr_date[2] < input$fltr_date[1]) {
+      end_date = input$fltr_date[1]
+    }
+    updateDateRangeInput(session,"fltr_date", start=input$date_range[1], end=end_date)
+  })
+  
+  # UI for sterling ratio and add data button
+  output$sterling_msg_ui <- renderUI({
+    if(!is.null(stock$sterling)) {
+      if(is.null(stock$sterling_data)){
+        list(
+          fluidRow(
+            column(width = 8, div(p(paste("For the current selection the Sterling ratio is", 
+                                          round(stock$sterling, 5))), 
+                                  style = "color:#efefef")),
+            column(width = 4, actionButton("add_sterling", "Create Sterling plot"))
+          ),
+          p("")
+        )
+      } else {
+        list(
+          fluidRow(
+            column(width = 8, div(p(paste("For the current selection the Sterling ratio is", 
+                                          round(stock$sterling, 5))), 
+                                  style = "color:#efefef")),
+            column(width = 4, actionButton("add_sterling", "Add value to plot"))
+          ),
+          p("")
+        )
+      }
+    }
+  })
+  
+  # If button is pressed update the data with new data
+  observeEvent(input$add_sterling, {
+    stock$sterling_data <- bind_rows(
+      stock$sterling_data,
+      tibble(
+        Stock    = input$stock,
+        From     = input$fltr_date[1],
+        To       = input$fltr_date[2],
+        Sterling = stock$sterling,
+        CAGR_avg = stock$avg_cagr,
+        MDD      = stock$mdd,
+        Legend   = paste0(input$stock, " (",
+                          input$fltr_date[1], " - ",
+                          input$fltr_date[2], ")")
+      )
+    )
+  })
+  
+  # Generate Sterling plot
+  output$sterling_plot <- renderPlot({
+    if(!is.null(stock$sterling_data)){
+       plot <- ggplot(stock$sterling_data, aes(x = CAGR_avg, y = Sterling, color = Legend)) + 
+        geom_point()
+       
+       if(stock$highlight == "Maximum") {
+         plot <- plot + 
+           geom_hline(yintercept = max(stock$sterling_data$Sterling), linetype = 2)
+       } else if(stock$highlight == "Minimum") {
+         plot <- plot + 
+           geom_hline(yintercept = min(stock$sterling_data$Sterling), linetype = 2)
+       }
+    } else { plot <- NULL }
+    plot
+  })
+  
+  # # Generate Sterling plot
+  # output$highlight_sterling_plot <- renderUI({
+  #   if(!is.null(stock$sterling_data)){
+  #     list(
+  #       
+  #     )
+  #   } else { NULL }
+  # })
+  
+  observeEvent(input$stock_highlight, {
+    if(!is.null(input$stock_highlight)) {
+      stock$highlight <- input$stock_highlight
+    }
+  })
+  
+  # Generate plot without text labels
+  base_plot <- reactive({
+    if(!is.null(stock$plot_data)) {
+      
+      plot <- stock$plot_data %>% 
+        ggplot(aes(x = Date, y = cagr)) +
+          theme_minimal() +
+          geom_line(colour = "darkred") + 
+          geom_point(colour = "steelblue", size = 3) + 
+          scale_x_date(name        = "Date",
+                       date_breaks = "days",
+                       labels      = date_format("%d-%m-%Y")) +
+          ylab("CAGR") + 
+          theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    } else { plot <- NULL }
+    plot
+  })
+  
+  # Return plot with or without labels
+  output$cagr_plot <- renderPlot({
+    if(!is.null(base_plot())) {
+      if(input$text_labels) {
+        base_plot() +
+          geom_label(aes(label = paste0(cagr)), nudge_y = 0.002, alpha = 0.85)
+      } else {
+        base_plot()
+      }
+    } else { NULL }
+  })
+
+  # Generate the plot output with flexible width
+  output$cagr_plot_ui <- renderUI({
+    if(!is.null(stock$plot_data) & !is.null(input$fltr_date[2])) {
+      wdth <- paste0(round(abs(input$fltr_date[1]-input$fltr_date[2]) * 4.4 * 6), "px")
+      plotOutput("cagr_plot", width = wdth, height = "600px")
+    }
+  })
+  
+  # Message of first closing value of selected dates
+  output$closing_value_and_mdd <- renderText({
+    if(!is.null(stock$plot_data) & !is.null(input$fltr_date[1]) & !is.null(stock$avg_dd)) {
+      val <- stock$plot_data[[1, "t_0"]]
+      paste0("The closing value on ", input$fltr_date[1], " was ", val,
+             ". The average draw down for the selected period is ", 
+             round(stock$avg_dd, 3))
+    }
+  })
+  
+  # Table with Date and CAGR rounded to two digits
+  output$table <- renderDataTable({
+    if(!is.null(stock$sterling_data)) {
+      dplyr::select(stock$sterling_data, - Legend)
+    } else { NULL }
+  })
+  
+})
+
+
+ui.r
+
+
+shinyUI(fluidPage(
+  tags$head(tags$style(
+    HTML('
+         body {
+           background-color: #347812;
+         }
+         
+         #well {
+           background-color: #347812;
+           border:0px;
+         }')
+  )),
+  p(""),
+  fluidRow(
+    column(width = 4),
+    column(width = 8, div(h2("Sterling Ratio")), style = "color:#efefef")
+  ),
+  hr(),
+  fluidRow(
+    column(width = 2),
+    column(width = 2, 
+           div(p(strong("Stock")), style = "color:#efefef"),
+           selectInput("stock", NULL, choices = stock, selected = "AAPL")),
+    column(width = 2, 
+           div(p(strong("Data source")), style = "color:#efefef"),
+           selectInput("source", NULL, choices = sources, selected = "google")),
+    column(width = 1, 
+           div(p(strong("Show labels")), style = "color:#efefef"),
+           checkboxInput("text_labels", " ", FALSE)),
+    column(width = 3, uiOutput("fltr_date_ui")),
+    column(width = 3)
+  ),
+  hr(),
+  fluidRow(
+    column(width = 2),
+    column(width = 8,
+           uiOutput("sterling_msg_ui"),
+           div(plotOutput("sterling_plot"), style = "background-colour:#347812"),
+           # uiOutput("highlight_sterling_plot"),
+           p(""),
+           div(p("Highlight"), 
+               style = "color:#efefef"),
+           selectInput("stock_highlight", NULL, 
+                       choices  = c("None", "Minimum", "Maximum"), 
+                       selected = "None")
+    ),
+    column(width = 2)
+  ),
+  hr(),
+  fluidRow(
+    column(width = 2),
+    column(width = 8, div(dataTableOutput("table"),
+                          style = "color:#121212; background-color: #ffffff;")),
+    column(width = 2)
+  ),  
+  fluidRow(
+    column(width = 2),
+    column(width = 8, 
+           div(textOutput("closing_value_and_mdd"), style = "color:#efefef"),
+           wellPanel(id = "well",
+                     style = "overflow-x:auto; max-width: 100%; align:center;",
+                     div(uiOutput("cagr_plot_ui"), align = "center"))),
+    column(width = 2)
+  ),
+  p("")
+))
