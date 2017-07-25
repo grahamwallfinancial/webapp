@@ -7,20 +7,14 @@ library(zoo)
 library(lubridate)
 library(scales)
 
-# ss <- stockSymbols() %>% as_data_frame() %>% 
-#   mutate(opts = paste0(Name, " (", Symbol, ")"))
-# 
-# apple_opts <- ss %>% 
-#   filter(Symbol == "AAPL") %>% 
-#   select(opts) %>% 
-#   `[[`(1)
-
 sources <- c("yahoo", "google")
 # sources <- c("yahoo", "google", "MySQL", "FRED", "csv", "RData", "oanda")
 
 stock <- c("AAPL", "GOOG", "FB", "AMZN", "MSFT")
 
+
 server.r
+
 
 
 shinyServer(function(input, output, session) {
@@ -225,23 +219,6 @@ shinyServer(function(input, output, session) {
                      labeller = as_labeller(c(Close = 'Daily Close',
                                               mdd = 'Maximum Draw Down')))
       
-      # stock$mdd %>%
-      #   ggplot(aes(x = Date, y = Close)) +
-      #   theme_light() +
-      #   theme(axis.title.y = element_blank()) +
-      #   geom_line(colour = "steelblue") +
-      #   geom_segment(data = mdd_hline, 
-      #                aes(x = x1, xend = x2, y = y1, yend = y2),
-      #                colour = "darkred",
-      #                linetype = 2) +
-      #   geom_segment(data = mdd_arrow, 
-      #                aes(x = x1, xend = x2, y = y1, yend = y2),
-      #                colour = "darkred",
-      #                size = 1,
-      #                arrow = arrow(length = unit(0.1, "inches"), ends = "both")) +
-      #   geom_text(data = mdd_text, aes(x = x, y = y, label = label)) +
-      #   expand_limits(y = 0)
-      
     } else { NULL }
   })
 
@@ -249,6 +226,7 @@ shinyServer(function(input, output, session) {
 
 
 ui.r
+
 
 
 shinyUI(fluidPage(
@@ -297,3 +275,4 @@ shinyUI(fluidPage(
     )
   )
 ))
+
